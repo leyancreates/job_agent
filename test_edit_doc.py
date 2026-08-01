@@ -1,11 +1,22 @@
-from google_docs_editor import tailor_google_doc
+"""Manual smoke test. Set TEST_GOOGLE_DOC_ID before running."""
 
-doc_id = "1469NlpqHa7pnvCEudLRMZs8mZRLMEXQerZge9_JCwic"
+import os
 
-job_description = """
-This role requires data analysis, attention to detail, communication, Excel, reporting, and teamwork.
-"""
+from google_docs_editor import preview_tailoring
 
-result = tailor_google_doc(doc_id, job_description)
 
-print(result)
+def main() -> None:
+    doc_id = os.getenv("TEST_GOOGLE_DOC_ID")
+    if not doc_id:
+        raise SystemExit("Set TEST_GOOGLE_DOC_ID to run this manual test.")
+    bullets, improved = preview_tailoring(
+        doc_id,
+        "This role requires data analysis, attention to detail, Excel, reporting, and teamwork.",
+    )
+    for original, suggestion in zip(bullets, improved):
+        print(f"- {original.text}\n+ {suggestion}\n")
+
+
+if __name__ == "__main__":
+    main()
+

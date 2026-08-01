@@ -1,74 +1,27 @@
-from openai import OpenAI
+"""Small command-line resume bullet editor."""
 
-client = OpenAI()
+from google_docs_editor import Bullet, improve_bullets
 
-print("AI Resume Editor\n")
 
-# 输入岗位 JD
-print("Paste job description (type END to finish):")
-lines = []
-while True:
-    line = input()
-    if line == "END":
-        break
-    lines.append(line)
+def read_until_end(prompt: str) -> str:
+    print(prompt)
+    lines = []
+    while True:
+        line = input()
+        if line == "END":
+            return "\n".join(lines)
+        lines.append(line)
 
-job_description = "\n".join(lines)
 
-# 输入你简历的一段（先测试一小段）
-print("\nPaste ONE resume bullet point (type END to finish):")
-lines = []
-while True:
-    line = input()
-    if line == "END":
-        break
-    lines.append(line)
+def main() -> None:
+    print("AI Resume Editor\n")
+    job_description = read_until_end("Paste job description (type END to finish):")
+    resume_text = read_until_end("\nPaste one resume bullet point (type END to finish):")
+    result = improve_bullets(job_description, [Bullet(resume_text, 0, len(resume_text))])
+    print("\nImproved version:\n")
+    print(result[0])
 
-resume_text = "\n".join(lines)
 
-print("\n--- AI Improving Resume ---\n")
+if __name__ == "__main__":
+    main()
 
-# 调用 AI
-response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[
-        {
-            "role": "system",
-            "content": """
-You are a professional resume editor.
-
-IMPORTANT RULES:
-- Do NOT invent fake experience.
-- Only rewrite based on the given resume.
-- Do NOT add new roles or jobs.
-- Keep it realistic and truthful.
-- Make it concise and professional.
-
-Your goal:
-Improve the resume bullet point to better match the job description,
-while keeping the original meaning.
-"""},
-        {
-            "role": "user",
-            "content": f"""
-Job Description:
-{job_description}
-
-Resume Bullet Point:
-{resume_text}
-
-Task:
-Rewrite this bullet point to better match the job.
-
-Rules:
-- Keep it ONE bullet point
-- Do NOT create new experience
-- Do NOT change facts
-- Make it stronger and more relevant
-"""
-        }
-    ]
-)
-
-print("Improved Version:\n")
-print(response.choices[0].message.content)
