@@ -1,57 +1,60 @@
+"""Streamlit UI for previewing and applying resume edits."""
 
 import streamlit as st
+
+from doc_utils import extract_doc_id
+from google_docs_editor import apply_tailoring, preview_tailoring
 from google_docs_reader import read_google_doc
-from google_docs_editor import tailor_google_doc
+
 
 st.title("AI Resume Tailor Agent")
-
-st.write("Paste a Google Docs resume link and a job description. The agent will improve bullet points directly inside Google Docs while keeping the original format.")
-
-def extract_doc_id(link):
-    if "/document/d/" in link:
-        return link.split("/document/d/")[1].split("/")[0]
-    return ""
+st.write("Preview truthful, job-specific resume edits before applying them to Google Docs.")
 
 google_doc_link = st.text_input("Google Docs Resume Link")
-
-job_description = st.text_area(
-    "Job Description",
-    height=220,
-    placeholder="Paste the job description here..."
-)
-
+job_description = st.text_area("Job Description", height=220)
 doc_id = extract_doc_id(google_doc_link)
 
-if st.button("Preview Resume from Google Docs"):
+if st.button("Load resume"):
     if not doc_id:
         st.error("Please enter a valid Google Docs link.")
     else:
-        with st.spinner("Reading Google Docs..."):
-            try:
-                resume_text = read_google_doc(doc_id)
-                st.session_state["resume_text"] = resume_text
-                st.success("Resume loaded successfully.")
-            except Exception as e:
-                st.error(f"Error reading Google Docs: {e}")
+        try:
+            with st.spinner("Reading Google Docs..."):
+                st.session_state["resume_text"] = read_google_doc(doc_id)
+            st.success("Resume loaded.")
+        except Exception as exc:
+            st.error(f"Could not read the document: {exc}")
 
 if "resume_text" in st.session_state:
-    st.subheader("Resume Preview")
-    st.text_area(
-        "Loaded Resume",
-        value=st.session_state["resume_text"],
-        height=300
-    )
+    st.text_area("Resume preview", value=st.session_state["resume_text"], height=300, disabled=True)
 
-if st.button("Tailor Google Docs Resume"):
-    if not doc_id:
-        st.error("Please enter a valid Google Docs link.")
-    elif not job_description:
-        st.warning("Please paste a job description.")
+if st.button("Generate edit preview"):
+    if not doc_id or not job_description.strip():
+        st.warning("Add a valid Google Docs link and job description first.")
     else:
-        with st.spinner("AI is tailoring your Google Docs resume..."):
+        try:
+            with st.spinner("Preparing suggestions..."):
+                bullets, improved = preview_tailoring(doc_id, job_description)
+            st.session_state["edit_preview"] = (doc_id, bullets, improved)
+        except Exception as exc:
+            st.error(f"Could not prepare suggestions: {exc}")
+
+preview = st.session_state.get("edit_preview")
+if preview:
+    preview_doc_id, bullets, improved = preview
+    if not bullets:
+        st.info("No bullet points were found in this document.")
+    else:
+        st.subheader("Review proposed changes")
+        for index, (original, replacement) in enumerate(zip(bullets, improved), start=1):
+            st.markdown(f"**{index}. Original** — {original.text}")
+            st.markdown(f"**Proposed** — {replacement}")
+
+        st.warning("Applying will update the original Google Doc. Review every change first.")
+        if st.button("Apply reviewed changes", type="primary"):
             try:
-                result = tailor_google_doc(doc_id, job_description)
-                st.success(result)
-                st.info("Open or refresh your Google Docs file to see the updated bullet points.")
-            except Exception as e:
-                st.error(f"Error tailoring resume: {e}")
+                count = apply_tailoring(preview_doc_id, bullets, improved)
+                st.success(f"Updated {count} bullet points.")
+                del st.session_state["edit_preview"]
+            except Exception as exc:
+                st.error(f"Could not apply changes: {exc}")
