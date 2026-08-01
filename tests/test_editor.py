@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import google_docs_editor
 from google_docs_editor import Bullet, apply_tailoring, improve_bullets
 
 
@@ -31,3 +32,13 @@ def test_apply_tailoring_validates_counts():
     with pytest.raises(ValueError):
         apply_tailoring("doc", [Bullet("A bullet", 1, 9)], [])
 
+
+def test_apply_tailoring_rejects_stale_preview(monkeypatch):
+    original = [Bullet("Original", 1, 10)]
+    monkeypatch.setattr(
+        google_docs_editor,
+        "get_bullet_paragraphs",
+        lambda _doc_id: [Bullet("Changed", 1, 9)],
+    )
+    with pytest.raises(ValueError, match="changed after this preview"):
+        apply_tailoring("doc", original, ["Improved"])
