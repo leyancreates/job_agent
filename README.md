@@ -1,6 +1,31 @@
-# AI Resume Tailor Agent
+# AI Job Search Agent
 
-A Python and Streamlit tool that reads a Google Docs resume, proposes truthful job-specific bullet rewrites, and applies them only after review.
+A modular Python and Streamlit project for finding public jobs, saving opportunities, and tailoring a Google Docs resume. Phase 1 does not submit applications.
+
+## Architecture
+
+```text
+app.py                    Streamlit tabs and presentation
+jobs/
+  models.py               normalized JobPosting model
+  urls.py                 Greenhouse and Lever URL parsing
+  greenhouse.py           Greenhouse Job Board API adapter
+  lever.py                Lever Postings API adapter
+  service.py              collection, filtering, warnings, deduplication
+  text.py                 safe HTML-to-text conversion
+google_docs_reader.py     Google Docs authentication and reading
+google_docs_editor.py     resume preview and confirmed write-back
+tests/                    mocked HTTP and resume workflow tests
+```
+
+## Job Finder
+
+- Enter keywords and a location.
+- Optionally paste a public `boards.greenhouse.io/...` or `jobs.lever.co/...` company board URL.
+- Select rows and save them for the current browser session.
+- Download saved jobs as CSV for durable local storage.
+
+Greenhouse and Lever expose company-specific public APIs, not a global search endpoint. To search a maintained set of boards when no URL is entered, configure a comma-separated `JOB_BOARD_URLS` environment variable. LinkedIn, Indeed, and automatic application submission are intentionally out of scope.
 
 ## Safety and behavior
 
@@ -39,6 +64,7 @@ Set `GOOGLE_CLIENT_SECRET_FILE=client_secret.json`. The first Google Docs operat
    ```toml
    OPENAI_API_KEY = "your-api-key"
    OPENAI_MODEL = "gpt-5.6-luna"
+   JOB_BOARD_URLS = "https://boards.greenhouse.io/company,https://jobs.lever.co/company"
    GOOGLE_SERVICE_ACCOUNT_JSON = '''{"type":"service_account", "project_id":"...", "private_key":"...", "client_email":"..."}'''
    ```
 
