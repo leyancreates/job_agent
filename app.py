@@ -1,10 +1,23 @@
 """Streamlit UI for previewing and applying resume edits."""
 
+import logging
+
 import streamlit as st
 
 from doc_utils import extract_doc_id
 from google_docs_editor import apply_tailoring, preview_tailoring
-from google_docs_reader import read_google_doc
+from google_docs_reader import ConfigurationError, read_google_doc
+
+logger = logging.getLogger(__name__)
+
+
+def show_operation_error(action: str, exc: Exception) -> None:
+    """Show safe configuration feedback while keeping diagnostics in Cloud logs."""
+    logger.exception("Failed to %s", action)
+    if isinstance(exc, ConfigurationError):
+        st.error(str(exc))
+    else:
+        st.error(f"Could not {action}. Check the app logs or contact the app owner.")
 
 
 st.title("AI Resume Tailor Agent")
@@ -23,7 +36,7 @@ if st.button("Load resume"):
                 st.session_state["resume_text"] = read_google_doc(doc_id)
             st.success("Resume loaded.")
         except Exception as exc:
-            st.error(f"Could not read the document: {exc}")
+            show_operation_error("read the document", exc)
 
 if "resume_text" in st.session_state:
     st.text_area("Resume preview", value=st.session_state["resume_text"], height=300, disabled=True)
@@ -37,7 +50,7 @@ if st.button("Generate edit preview"):
                 bullets, improved = preview_tailoring(doc_id, job_description)
             st.session_state["edit_preview"] = (doc_id, bullets, improved)
         except Exception as exc:
-            st.error(f"Could not prepare suggestions: {exc}")
+            show_operation_error("prepare suggestions", exc)
 
 preview = st.session_state.get("edit_preview")
 if preview:
@@ -57,4 +70,4 @@ if preview:
                 st.success(f"Updated {count} bullet points.")
                 del st.session_state["edit_preview"]
             except Exception as exc:
-                st.error(f"Could not apply changes: {exc}")
+                show_operation_error("apply changes", exc)
