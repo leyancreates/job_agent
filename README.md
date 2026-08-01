@@ -7,7 +7,7 @@ A Python and Streamlit tool that reads a Google Docs resume, proposes truthful j
 - Never asks the model to invent experience, metrics, tools, or qualifications.
 - Uses structured JSON output so the number of suggestions must match the original bullets.
 - Shows every proposed rewrite before changing the document.
-- Stores Google OAuth tokens locally in ignored `token.json`.
+- Uses a service account in Streamlit Community Cloud and cached OAuth locally.
 - Reads secrets from environment variables; credentials are never committed.
 
 ## Setup
@@ -19,7 +19,7 @@ A Python and Streamlit tool that reads a Google Docs resume, proposes truthful j
    pip install -r requirements.txt
    ```
 
-3. Copy `.env.example` to `.env` and set `OPENAI_API_KEY`. Optionally override `OPENAI_MODEL`.
+3. Export `OPENAI_API_KEY`. Optionally override `OPENAI_MODEL`.
 4. In Google Cloud, enable the Google Docs API and Google Drive API, create an OAuth Desktop App, and download its JSON credentials as `client_secret.json`.
 5. Run:
 
@@ -27,7 +27,26 @@ A Python and Streamlit tool that reads a Google Docs resume, proposes truthful j
    streamlit run app.py
    ```
 
-The first Google Docs operation opens a browser consent flow. Later runs reuse `token.json`. If OAuth scopes change, delete `token.json` and authorize again.
+Set `GOOGLE_CLIENT_SECRET_FILE=client_secret.json`. The first Google Docs operation opens a browser consent flow; later runs reuse the ignored `token.json`. If OAuth scopes change, delete `token.json` and authorize again.
+
+## Deploy to Streamlit Community Cloud
+
+1. Create a Google Cloud service account, enable the Google Docs and Drive APIs, and download its JSON key once.
+2. Share each resume Google Doc with the service account's `client_email` as an editor. A service account cannot access a document merely because its URL is known.
+3. Open [Streamlit Community Cloud](https://share.streamlit.io), choose this repository and branch, and set the entrypoint to `app.py`.
+4. In **Advanced settings**, select Python 3.12 and paste these root-level secrets:
+
+   ```toml
+   OPENAI_API_KEY = "your-api-key"
+   OPENAI_MODEL = "gpt-5.6-luna"
+   GOOGLE_SERVICE_ACCOUNT_JSON = '''{"type":"service_account", "project_id":"...", "private_key":"...", "client_email":"..."}'''
+   ```
+
+   Paste the complete downloaded service-account JSON between the triple single quotes. Never add `.streamlit/secrets.toml`, the JSON key file, or API keys to Git.
+
+5. Deploy. If startup fails, open **Manage app → Logs** and verify the dependency installation and secret names.
+
+Community Cloud exposes root-level secrets as environment variables, which this app reads through `os.environ`. The repository-root `requirements.txt` is the only production dependency file.
 
 ## Development
 
@@ -42,4 +61,3 @@ python -m compileall .
 ## Notes
 
 The default model is `gpt-5.6-luna`, suitable for efficient, high-volume text work. Set `OPENAI_MODEL` to another model your API project can access if needed.
-
