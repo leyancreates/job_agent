@@ -113,6 +113,12 @@ def apply_tailoring(doc_id: str, bullets: list[Bullet], improved_lines: list[str
     if not bullets:
         return 0
 
+    current_bullets = get_bullet_paragraphs(doc_id)
+    if current_bullets != bullets:
+        raise ValueError(
+            "The document changed after this preview was generated. Create a new preview before applying."
+        )
+
     docs_service, _ = get_google_services()
     requests = []
     for bullet, new_text in zip(reversed(bullets), reversed(improved_lines)):
@@ -130,4 +136,3 @@ def apply_tailoring(doc_id: str, bullets: list[Bullet], improved_lines: list[str
         documentId=doc_id, body={"requests": requests}
     ).execute()
     return len(bullets)
-
