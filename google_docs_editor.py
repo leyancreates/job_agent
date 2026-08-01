@@ -1,141 +1,133 @@
-from google_docs_reader import get_google_services
+"""Preview and apply truthful, job-specific Google Docs resume edits."""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+
 from openai import OpenAI
 
-client = OpenAI()
+from google_docs_reader import get_google_services
 
-def get_bullet_paragraphs(doc_id):
+DEFAULT_MODEL = "gpt-5.6-luna"
+
+
+@dataclass(frozen=True)
+class Bullet:
+    text: str
+    start: int
+    end: int
+
+
+def get_bullet_paragraphs(doc_id: str) -> list[Bullet]:
     docs_service, _ = get_google_services()
     doc = docs_service.documents().get(documentId=doc_id).execute()
+    results: list[Bullet] = []
 
-    results = []
-
-    for element in doc["body"]["content"]:
-        if "paragraph" not in element:
+    for element in doc.get("body", {}).get("content", []):
+        paragraph = element.get("paragraph")
+        if not paragraph or "bullet" not in paragraph:
             continue
 
-        paragraph = element["paragraph"]
-
-        if "bullet" not in paragraph:
-            continue
-
-        text = ""
+        text_parts: list[str] = []
         start_index = None
         end_index = None
-
         for run in paragraph.get("elements", []):
-            if "textRun" in run:
-                text += run["textRun"]["content"]
-                if start_index is None:
-                    start_index = run["startIndex"]
-                end_index = run["endIndex"]
+            if "textRun" not in run:
+                continue
+            text_parts.append(run["textRun"].get("content", ""))
+            start_index = run["startIndex"] if start_index is None else start_index
+            end_index = run["endIndex"]
 
-        clean_text = text.strip()
-
-        if clean_text:
-            results.append({
-                "text": clean_text,
-                "start": start_index,
-                "end": end_index
-            })
-
+        clean_text = "".join(text_parts).strip()
+        if clean_text and start_index is not None and end_index is not None:
+            results.append(Bullet(clean_text, start_index, end_index))
     return results
 
 
-def improve_bullets(job_description, bullets):
-    original_text = "\n".join([f"- {b['text']}" for b in bullets])
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": """"
-You are a professional resume editor.
-
-Rules:
-- Rewrite each bullet point only.
-- Do NOT change the number of bullet points.
-- Do NOT invent fake experience.
-- Do NOT add tools, companies, degrees, or certifications not already mentioned.
-- Keep each bullet VERY concise.
-- Each bullet must be under 16 words.
-- Do NOT mention AI unless the original bullet already mentions AI.
-- Do NOT add phrases like "AI training", "AI model", or "AI systems" unless they already appear in the original resume.
-- Return only the improved bullet text.
-- One bullet per line.
-"""
-            },
-            {
-                "role": "user",
-                "content": f"""
-Job Description:
-{job_description}
-
-Original bullet points:
-{original_text}
-
-Rewrite these bullets to better match the job.
-"""
-            }
-        ]
-    )
-
-    improved_text = response.choices[0].message.content
-
-    improved_lines = [
-        line.strip("-• ").strip()
-        for line in improved_text.split("\n")
-        if line.strip()
-    ]
-
-    return improved_lines
-
-
-def replace_bullets_in_doc(doc_id, bullets, improved_lines):
-    docs_service, _ = get_google_services()
-
-    requests = []
-
-    # 从后往前替换，避免 index 变化
-    for bullet, new_text in zip(reversed(bullets), reversed(improved_lines)):
-        start = bullet["start"]
-        end = bullet["end"]
-
-        requests.append({
-            "deleteContentRange": {
-                "range": {
-                    "startIndex": start,
-                    "endIndex": end - 1
-                }
-            }
-        })
-
-        requests.append({
-            "insertText": {
-                "location": {
-                    "index": start
-                },
-                "text": new_text
-            }
-        })
-
-    docs_service.documents().batchUpdate(
-        documentId=doc_id,
-        body={"requests": requests}
-    ).execute()
-
-
-def tailor_google_doc(doc_id, job_description):
-    bullets = get_bullet_paragraphs(doc_id)
-
+def improve_bullets(
+    job_description: str,
+    bullets: list[Bullet],
+    *,
+    client: OpenAI | None = None,
+) -> list[str]:
+    if not job_description.strip():
+        raise ValueError("Job description cannot be empty.")
     if not bullets:
-        return "No bullet points found."
+        return []
 
-    improved_lines = improve_bullets(job_description, bullets)
+    api_client = client or OpenAI()
+    model = os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+    numbered = "\n".join(f"{index + 1}. {bullet.text}" for index, bullet in enumerate(bullets))
+    schema = {
+        "type": "object",
+        "properties": {
+            "bullets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": len(bullets),
+                "maxItems": len(bullets),
+            }
+        },
+        "required": ["bullets"],
+        "additionalProperties": False,
+    }
 
-    if len(improved_lines) != len(bullets):
-        return "AI returned a different number of bullets. Please try again."
+    response = api_client.responses.create(
+        model=model,
+        instructions=(
+            "You are a professional resume editor. Rewrite each bullet without changing facts. "
+            "Never invent experience, metrics, tools, employers, degrees, or certifications. "
+            "Keep the original order and return exactly one rewrite per input bullet. "
+            "Each rewrite must be concise, professional, and at most 24 words."
+        ),
+        input=f"Job description:\n{job_description}\n\nResume bullets:\n{numbered}",
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "tailored_resume_bullets",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    )
+    payload = json.loads(response.output_text)
+    improved = [text.strip().lstrip("-• ").strip() for text in payload["bullets"]]
+    if len(improved) != len(bullets) or any(not text for text in improved):
+        raise ValueError("The model returned an invalid set of bullet points.")
+    return improved
 
-    replace_bullets_in_doc(doc_id, bullets, improved_lines)
 
-    return f"Updated {len(bullets)} bullet points in Google Docs."
+def preview_tailoring(doc_id: str, job_description: str) -> tuple[list[Bullet], list[str]]:
+    bullets = get_bullet_paragraphs(doc_id)
+    if not bullets:
+        return [], []
+    return bullets, improve_bullets(job_description, bullets)
+
+
+def apply_tailoring(doc_id: str, bullets: list[Bullet], improved_lines: list[str]) -> int:
+    """Apply a previously previewed edit after the caller obtains user confirmation."""
+    if len(bullets) != len(improved_lines):
+        raise ValueError("Original and improved bullet counts must match.")
+    if not bullets:
+        return 0
+
+    docs_service, _ = get_google_services()
+    requests = []
+    for bullet, new_text in zip(reversed(bullets), reversed(improved_lines)):
+        requests.extend(
+            [
+                {
+                    "deleteContentRange": {
+                        "range": {"startIndex": bullet.start, "endIndex": bullet.end - 1}
+                    }
+                },
+                {"insertText": {"location": {"index": bullet.start}, "text": new_text}},
+            ]
+        )
+    docs_service.documents().batchUpdate(
+        documentId=doc_id, body={"requests": requests}
+    ).execute()
+    return len(bullets)
+
