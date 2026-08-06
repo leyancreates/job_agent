@@ -1,6 +1,6 @@
 # AI Job Search Agent
 
-A modular Python and Streamlit project for finding public jobs, saving opportunities, and tailoring a Google Docs resume. Phase 1 does not submit applications.
+A modular Python and Streamlit project for finding public jobs, saving opportunities, comparing resume fit, and tailoring a Google Docs resume. The app does not submit applications.
 
 ## Architecture
 
@@ -17,9 +17,13 @@ jobs/
   lever.py                Lever Postings API adapter
   service.py              concurrent fetch, retries, filtering, ranking, deduplication
   text.py                 safe HTML-to-text conversion
+matching/
+  models.py               validated scores, recommendations, and evidence fields
+  cache.py                thread-safe six-hour match-result cache
+  service.py              batched Responses API calls and strict JSON Schema validation
 google_docs_reader.py     Google Docs authentication and reading
 google_docs_editor.py     resume preview and confirmed write-back
-tests/                    mocked HTTP and resume workflow tests
+tests/                    mocked HTTP, OpenAI, Streamlit, and resume workflow tests
 ```
 
 ## Job Finder
@@ -70,10 +74,36 @@ Run `pytest tests/test_jobs.py` after every registry change. Tests enforce at le
 - Cache state and saved jobs are process/session scoped; download CSV before a Streamlit restart if durable storage is needed.
 - LinkedIn, Indeed, Google Jobs, protected sites, and automatic application submission are intentionally out of scope.
 
+## Resume Match Analysis
+
+1. In **Resume Tailor**, load a Google Docs resume. Its plain text is kept in the current Streamlit session and the document is not modified during scoring.
+2. Search or open Saved Jobs, select up to 10 rows, and choose **Analyze match**.
+3. The app sends one batched Responses API request for selected jobs that are not already cached.
+4. Open **Match Analysis** to compare overall, skills, experience, and education/domain scores. Expand each result for strengths, gaps, factual concerns, and a short explanation.
+5. Choose **Use this job in Resume Tailor** to copy that job description into the existing preview workflow. The app never rewrites or applies resume edits automatically.
+
+### Score interpretation
+
+- **Strong match (75–100):** the supplied text contains substantial explicit evidence for the role.
+- **Possible match (45–74):** there is useful alignment alongside material gaps or unknowns.
+- **Low match (0–44):** the supplied text provides limited evidence for important requirements.
+
+Scores are guidance for prioritizing review, not hiring predictions. Missing resume information is treated as unknown, not as a positive match. Location or work-authorization compatibility is shown only when the supplied resume and job text provide relevant evidence. The matcher does not infer protected or sensitive personal attributes.
+
+### Privacy, cost, and caching
+
+- Match requests contain only resume text plus each job's company, title, location, and description. Job URLs, source metadata, and saved-job state are not sent.
+- Responses API requests set `store=false`. Review your OpenAI organization settings and policies for any additional retention controls your deployment requires.
+- At most 10 jobs are analyzed per batch. Resume input is capped at 30,000 characters and each job description at 16,000 characters to bound latency and token usage; unusually long documents may therefore receive incomplete coverage.
+- Results are cached in memory for six hours using a SHA-256 hash of the resume, job details, and `OPENAI_MODEL`. Repeated Streamlit reruns reuse cached results, but cache state is lost when the process restarts.
+- Actual cost and latency depend on the configured model, input length, number of uncached jobs, and current API pricing. Use an efficient model for routine screening and verify quality on representative resumes.
+
 ## Safety and behavior
 
 - Never asks the model to invent experience, metrics, tools, or qualifications.
+- Treats absent experience, education, certifications, and work authorization as unknown.
 - Uses structured JSON output so the number of suggestions must match the original bullets.
+- Uses a separate strict JSON Schema for batched resume match results and validates scores again in Python.
 - Shows every proposed rewrite before changing the document.
 - Uses a service account in Streamlit Community Cloud and cached OAuth locally.
 - Reads secrets from environment variables; credentials are never committed.
