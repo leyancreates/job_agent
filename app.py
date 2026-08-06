@@ -13,6 +13,8 @@ from jobs.models import JobPosting
 from jobs.query import parse_search_query
 from jobs.registry import entry_from_url, load_registry
 from jobs.service import search_job_boards
+from matching.models import JobMatch
+from matching.service import MatchAnalysisError, analyze_job_matches
 
 logger = logging.getLogger(__name__)
 
@@ -28,16 +30,34 @@ def show_operation_error(action: str, exc: Exception) -> None:
 
 st.set_page_config(page_title="AI Job Search Agent", layout="wide")
 st.title("AI Job Search Agent")
-st.caption("Phase 1: tailor a resume, discover public jobs, and save opportunities. No automatic applications.")
+st.caption(
+    "Tailor a resume, discover public jobs, save opportunities, and compare resume fit. "
+    "No automatic applications."
+)
 
-resume_tab, finder_tab, saved_tab = st.tabs(["Resume Tailor", "Job Finder", "Saved Jobs"])
+pending_tailor_job = st.session_state.pop("pending_tailor_job", None)
+if pending_tailor_job:
+    st.session_state["tailor_job_description"] = pending_tailor_job["description"]
+    st.session_state["tailor_job_notice"] = (
+        f"Loaded {pending_tailor_job['title']} at {pending_tailor_job['company']} "
+        "from Match Analysis. Review it before generating edits."
+    )
+
+resume_tab, finder_tab, saved_tab, match_tab = st.tabs(
+    ["Resume Tailor", "Job Finder", "Saved Jobs", "Match Analysis"]
+)
 
 with resume_tab:
     st.header("Resume Tailor")
     st.write("Preview truthful, job-specific resume edits before applying them to Google Docs.")
 
-    google_doc_link = st.text_input("Google Docs Resume Link")
-    job_description = st.text_area("Job Description", height=220)
+    google_doc_link = st.text_input("Google Docs Resume Link", key="google_doc_link")
+    tailor_notice = st.session_state.get("tailor_job_notice")
+    if tailor_notice:
+        st.info(tailor_notice)
+    job_description = st.text_area(
+        "Job Description", height=220, key="tailor_job_description"
+    )
     doc_id = extract_doc_id(google_doc_link)
 
     if st.button("Load resume"):
@@ -46,13 +66,26 @@ with resume_tab:
         else:
             try:
                 with st.spinner("Reading Google Docs..."):
-                    st.session_state["resume_text"] = read_google_doc(doc_id)
-                st.success("Resume loaded.")
+                    resume_text = read_google_doc(doc_id)
+                if not resume_text.strip():
+                    st.warning("This Google Doc does not contain readable resume text.")
+                else:
+                    st.session_state["resume_text"] = resume_text
+                    st.session_state["resume_doc_id"] = doc_id
+                    st.success("Resume loaded for tailoring and match analysis.")
             except Exception as exc:
                 show_operation_error("read the document", exc)
 
     if "resume_text" in st.session_state:
-        st.text_area("Resume preview", value=st.session_state["resume_text"], height=300, disabled=True)
+        st.caption(
+            f"Resume ready for match analysis · {len(st.session_state['resume_text']):,} characters"
+        )
+        st.text_area(
+            "Resume preview",
+            value=st.session_state["resume_text"],
+            height=300,
+            disabled=True,
+        )
 
     if st.button("Generate edit preview"):
         if not doc_id or not job_description.strip():
@@ -99,6 +132,87 @@ def job_table_rows(jobs: list[JobPosting]) -> list[dict[str, str | None]]:
         }
         for job in jobs
     ]
+
+
+def selected_jobs(event, jobs: list[JobPosting]) -> list[JobPosting]:
+    rows = getattr(getattr(event, "selection", None), "rows", [])
+    return [jobs[index] for index in rows if 0 <= index < len(jobs)]
+
+
+def analyze_selection(jobs: list[JobPosting]) -> None:
+    if not jobs:
+        st.warning("Select at least one job to analyze.")
+        return
+    resume_text = st.session_state.get("resume_text", "")
+    if not resume_text.strip():
+        st.warning("Load your resume in Resume Tailor before analyzing matches.")
+        return
+    try:
+        with st.spinner(f"Analyzing {len(jobs)} selected job(s)..."):
+            st.session_state["match_results"] = analyze_job_matches(resume_text, jobs)
+        st.success("Match analysis is ready in the Match Analysis tab.")
+    except MatchAnalysisError as exc:
+        logger.warning("Match analysis failed", exc_info=True)
+        st.error(str(exc))
+    except Exception:
+        logger.exception("Unexpected match analysis failure")
+        st.error("Could not analyze these jobs. Check the app logs or contact the app owner.")
+
+
+def show_list(items: tuple[str, ...], empty_message: str) -> None:
+    if not items:
+        st.caption(empty_message)
+        return
+    for item in items:
+        st.markdown(f"- {item}")
+
+
+def show_match(match: JobMatch, index: int) -> None:
+    job = match.job
+    result = match.result
+    st.subheader(f"{job.title} · {job.company}")
+    score_column, recommendation_column = st.columns([1, 2])
+    score_column.metric("Overall match", f"{result.overall_score}/100")
+    recommendation_column.metric("Recommendation", result.recommendation)
+    st.progress(result.overall_score / 100)
+
+    skills_column, experience_column, education_column = st.columns(3)
+    skills_column.metric("Skills", result.skills_score)
+    experience_column.metric("Experience", result.experience_score)
+    education_column.metric("Education / domain", result.education_domain_score)
+
+    compatibility = result.location_work_authorization
+    if compatibility is not None:
+        st.info(
+            f"Location / work authorization — {compatibility.status}: "
+            f"{compatibility.explanation}"
+        )
+
+    with st.expander("Strengths, gaps, concerns, and explanation", expanded=index == 0):
+        st.markdown("**Matched strengths**")
+        show_list(result.matched_strengths, "No explicit strengths were identified.")
+        st.markdown("**Missing, weak, or unknown qualifications**")
+        show_list(
+            result.missing_or_weak_qualifications,
+            "No material gaps were identified from the supplied text.",
+        )
+        st.markdown("**Factual concerns**")
+        show_list(result.factual_concerns, "No factual concerns were identified.")
+        st.markdown("**Explanation**")
+        st.write(result.explanation)
+
+    if job.job_url:
+        st.link_button("Open job posting", job.job_url)
+    if st.button(
+        "Use this job in Resume Tailor",
+        key=f"use_match_for_tailoring_{index}_{result.job_id}",
+    ):
+        st.session_state["pending_tailor_job"] = {
+            "company": job.company,
+            "title": job.title,
+            "description": job.job_description,
+        }
+        st.rerun()
 
 
 with finder_tab:
@@ -193,13 +307,20 @@ with finder_tab:
             selection_mode="multi-row",
             column_config={"job URL": st.column_config.LinkColumn("job URL")},
         )
-        if st.button("Save selected jobs"):
-            selected_rows = event.selection.rows
-            saved = {job.dedupe_key: job for job in st.session_state.get("saved_jobs", [])}
-            for row_index in selected_rows:
-                saved[jobs[row_index].dedupe_key] = jobs[row_index]
-            st.session_state["saved_jobs"] = list(saved.values())
-            st.success(f"Saved {len(selected_rows)} selected job(s).")
+        finder_selection = selected_jobs(event, jobs)
+        save_column, analyze_column = st.columns(2)
+        with save_column:
+            if st.button("Save selected jobs", key="save_finder_jobs"):
+                saved = {
+                    job.dedupe_key: job for job in st.session_state.get("saved_jobs", [])
+                }
+                for job in finder_selection:
+                    saved[job.dedupe_key] = job
+                st.session_state["saved_jobs"] = list(saved.values())
+                st.success(f"Saved {len(finder_selection)} selected job(s).")
+        with analyze_column:
+            if st.button("Analyze match", key="analyze_finder_jobs"):
+                analyze_selection(finder_selection)
     elif "job_results" in st.session_state:
         st.info("No matching jobs were found.")
 
@@ -210,12 +331,16 @@ with saved_tab:
     if not saved_jobs:
         st.info("Select jobs in Job Finder and save them here for this session.")
     else:
-        st.dataframe(
+        saved_event = st.dataframe(
             job_table_rows(saved_jobs),
             hide_index=True,
             width="stretch",
+            on_select="rerun",
+            selection_mode="multi-row",
             column_config={"job URL": st.column_config.LinkColumn("job URL")},
         )
+        if st.button("Analyze match", key="analyze_saved_jobs"):
+            analyze_selection(selected_jobs(saved_event, saved_jobs))
         buffer = io.StringIO()
         writer = csv.DictWriter(buffer, fieldnames=list(saved_jobs[0].to_dict()))
         writer.writeheader()
@@ -226,3 +351,27 @@ with saved_tab:
             file_name="saved_jobs.csv",
             mime="text/csv",
         )
+
+
+with match_tab:
+    st.header("Resume Match Analysis")
+    st.caption(
+        "Scores are guidance based only on the supplied resume and job text; they are not "
+        "hiring predictions. Missing information is treated as unknown, never as a positive match."
+    )
+    match_results = st.session_state.get("match_results", [])
+    if not match_results:
+        st.info(
+            "Select up to 10 jobs in Job Finder or Saved Jobs, then choose Analyze match."
+        )
+    else:
+        for match_index, match in enumerate(
+            sorted(
+                match_results,
+                key=lambda item: item.result.overall_score,
+                reverse=True,
+            )
+        ):
+            show_match(match, match_index)
+            if match_index < len(match_results) - 1:
+                st.divider()
