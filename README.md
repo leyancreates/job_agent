@@ -10,11 +10,15 @@ jobs/
   boards.json             maintained registry of verified public company boards
   registry.py             registry loading and validation
   query.py                keyword and location parsing
+  relevance.py            synonym expansion, minimum threshold, and title-first scoring
   cache.py                thread-safe 15-minute response cache
-  models.py               normalized JobPosting model
-  urls.py                 Greenhouse and Lever URL parsing
+  models.py               normalized JobPosting model and match explanations
+  urls.py                 supported public ATS URL parsing
+  providers.py            common provider interface and safe Workday extension point
   greenhouse.py           Greenhouse Job Board API adapter
   lever.py                Lever Postings API adapter
+  smartrecruiters.py       SmartRecruiters public Posting API adapter
+  ashby.py                 Ashby public Job Postings API adapter
   service.py              concurrent fetch, retries, filtering, ranking, deduplication
   text.py                 safe HTML-to-text conversion
 matching/
@@ -28,13 +32,29 @@ tests/                    mocked HTTP, OpenAI, Streamlit, and resume workflow te
 
 ## Job Finder
 
-- Enter one query such as `Data Analyst Toronto`; the parser separates recognized locations from job keywords.
-- Choose **Search all configured companies** to search the maintained registry, or **Search one company URL** for a public `boards.greenhouse.io/...` or `jobs.lever.co/...` board.
+- Enter one query such as `Animation Toronto`; the parser separates recognized locations from job keywords.
+- Use a search preset for Data & Analytics, Education, Arts & Animation, Design, or Public Sector, then edit the generated query if needed.
+- Optionally restrict the registry to technology, education, arts/design, public sector, nonprofit, healthcare, finance, other, or all categories.
+- Choose **Search all configured companies** to search the maintained registry, or **Search one company URL** for a public Greenhouse, Lever, SmartRecruiters, or Ashby board.
 - Use the Remote or custom-location controls when automatic parsing is not appropriate.
+- Review each result's relevance score, matched query terms, and title/description match label.
 - Select rows and save them for the current browser session.
 - Download saved jobs as CSV for durable local storage.
 
-The bundled registry currently contains 57 boards verified on 2026-08-05: 53 Greenhouse companies and 4 Lever companies. Greenhouse and Lever expose company-specific public APIs, so the app searches this registry concurrently with at most eight workers. Each board receives a timeout and up to two retries; a failed company becomes a safe warning and does not stop the search. Successful board responses are cached in memory for 15 minutes.
+The bundled registry contains 89 boards verified on 2026-08-05 and 2026-08-06: 70 Greenhouse, 4 Lever, 10 SmartRecruiters, and 5 Ashby organizations. It includes universities, public-school systems, a museum, game and animation studios, nonprofits, public-sector employers, healthcare organizations, and education technology companies. The app searches public APIs concurrently with at most eight workers. Each board receives a timeout and up to two retries; a failed company becomes a safe warning and does not stop the search. Successful responses are cached in memory for 15 minutes.
+
+### Relevance and synonyms
+
+A location match never satisfies the keyword requirement. Every non-empty keyword concept must match and the result must also satisfy the requested location. Title matches receive the dominant score; description matches are secondary evidence. Results below the minimum relevance score of 30 are discarded, which prevents a Toronto software role from passing an `Animation Toronto` search merely because its description mentions animation.
+
+The maintained synonym groups include:
+
+- `animation`: animator, 2D/3D animator, motion designer, motion graphics, character artist
+- `education`: teacher, instructor, educator, lecturer, professor, tutor, curriculum, academic
+- `design`: graphic, visual, UX, and creative designer
+- `arts`: artist, gallery, museum, curator, arts coordinator
+
+Exact query phrases rank above synonym and close-title matches, which rank above mixed title/description and description-only matches. Description-only results must contain enough multi-term evidence to clear the threshold. Scores describe search relevance, not resume fit or hiring probability.
 
 ### Search flow
 
@@ -42,8 +62,9 @@ The bundled registry currently contains 57 boards verified on 2026-08-05: 53 Gre
 2. Load all registry entries or parse one user-supplied ATS URL.
 3. Fetch public board APIs concurrently with bounded connections, timeouts, retries, and per-board failure isolation.
 4. Normalize every posting into company, title, location, job URL, source, posted date, and description.
-5. Match all keyword tokens against title and description, apply a case-insensitive location filter, and deduplicate canonical URLs.
-6. Sort by title-weighted relevance and then the provider's public date field.
+5. Expand supported role synonyms and require every query concept plus the requested, case-insensitive location.
+6. Score exact/title matches above description evidence, reject results below the relevance threshold, and record matched terms and match type.
+7. Deduplicate canonical URLs and sort by relevance, then the provider's public date field.
 
 ### Maintaining the registry
 
@@ -55,14 +76,19 @@ Edit `jobs/boards.json` to add or remove companies. Every entry must contain:
   "provider": "greenhouse",
   "identifier": "example",
   "url": "https://boards.greenhouse.io/example",
-  "verified_at": "YYYY-MM-DD"
+  "verified_at": "YYYY-MM-DD",
+  "category": "technology"
 }
 ```
+
+`category` must be one of `technology`, `education`, `arts/design`, `public sector`, `nonprofit`, `healthcare`, `finance`, or `other`.
 
 Before adding an entry, verify that its official public endpoint returns HTTP 200 and a valid jobs collection:
 
 - Greenhouse: `https://boards-api.greenhouse.io/v1/boards/{identifier}/jobs`
 - Lever: `https://api.lever.co/v0/postings/{identifier}?mode=json`
+- SmartRecruiters: `https://api.smartrecruiters.com/v1/companies/{identifier}/postings`
+- Ashby: `https://api.ashbyhq.com/posting-api/job-board/{identifier}`
 
 Run `pytest tests/test_jobs.py` after every registry change. Tests enforce at least 50 unique entries, supported providers, URL/identifier agreement, and verification metadata.
 
@@ -71,6 +97,8 @@ Run `pytest tests/test_jobs.py` after every registry change. Tests enforce at le
 - The registry is maintained source data, not an exhaustive global jobs index. Companies may change ATS providers or disable boards after the recorded verification date.
 - Greenhouse exposes `updated_at`, which is used as the best available public date even though it may differ from the original posting date.
 - Lever does not expose board-level company metadata, so registry names are maintained explicitly.
+- SmartRecruiters list responses omit full descriptions. The adapter retrieves details only for title candidates, with a per-board safety cap, and falls back to public list metadata if one detail request fails.
+- Workday deployments vary and there is no generic public API assumed by this project. `JobProviderAdapter` includes a disabled Workday extension point, but the app never bypasses access controls or scrapes authenticated/protected pages.
 - Cache state and saved jobs are process/session scoped; download CSV before a Streamlit restart if durable storage is needed.
 - LinkedIn, Indeed, Google Jobs, protected sites, and automatic application submission are intentionally out of scope.
 

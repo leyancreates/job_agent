@@ -9,7 +9,17 @@ from pathlib import Path
 from jobs.urls import BoardReference, parse_board_url
 
 REGISTRY_PATH = Path(__file__).with_name("boards.json")
-SUPPORTED_PROVIDERS = {"greenhouse", "lever"}
+SUPPORTED_PROVIDERS = {"greenhouse", "lever", "smartrecruiters", "ashby"}
+CATEGORIES = {
+    "technology",
+    "education",
+    "arts/design",
+    "public sector",
+    "nonprofit",
+    "healthcare",
+    "finance",
+    "other",
+}
 
 
 @dataclass(frozen=True)
@@ -19,6 +29,7 @@ class BoardEntry:
     identifier: str
     url: str
     verified_at: str
+    category: str = "other"
 
     def board_reference(self) -> BoardReference:
         reference = parse_board_url(self.url)
@@ -34,7 +45,11 @@ def load_registry(path: Path = REGISTRY_PATH) -> list[BoardEntry]:
     if len(keys) != len(entries):
         raise ValueError("Job-board registry contains duplicate provider identifiers.")
     for entry in entries:
-        if entry.provider not in SUPPORTED_PROVIDERS or not entry.company.strip():
+        if (
+            entry.provider not in SUPPORTED_PROVIDERS
+            or entry.category not in CATEGORIES
+            or not entry.company.strip()
+        ):
             raise ValueError(f"Invalid registry entry: {entry}")
         entry.board_reference()
     return entries
@@ -48,4 +63,5 @@ def entry_from_url(url: str) -> BoardEntry:
         identifier=reference.token,
         url=url.strip(),
         verified_at="user-supplied",
+        category="other",
     )

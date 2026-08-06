@@ -15,6 +15,9 @@ class JobPosting:
     source: str
     posted_date: str | None
     job_description: str
+    relevance_score: int = 0
+    matched_terms: tuple[str, ...] = ()
+    match_type: str | None = None
 
     @property
     def dedupe_key(self) -> tuple[str, ...]:
@@ -28,6 +31,7 @@ class JobPosting:
             value.casefold().strip() for value in (self.company, self.title, self.location)
         )
 
-    def to_dict(self) -> dict[str, str | None]:
-        return asdict(self)
-
+    def to_dict(self) -> dict[str, str | int | None]:
+        payload = asdict(self)
+        payload["matched_terms"] = ", ".join(self.matched_terms)
+        return payload
