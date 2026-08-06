@@ -57,6 +57,31 @@ def test_streamlit_app_starts_without_exception():
     assert not app.exception
 
 
+def test_job_finder_exposes_presets_and_category_filter():
+    app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=20)
+    selectboxes = {widget.label: widget for widget in app.selectbox}
+
+    assert set(selectboxes["Search preset"].options) >= {
+        "Data & Analytics",
+        "Education",
+        "Arts & Animation",
+        "Design",
+        "Public Sector",
+    }
+    assert set(selectboxes["Industry / category"].options) >= {
+        "education",
+        "arts/design",
+        "public sector",
+        "nonprofit",
+    }
+
+    selectboxes["Search preset"].set_value("Education").run(timeout=20)
+    selectboxes = {widget.label: widget for widget in app.selectbox}
+    query_input = next(widget for widget in app.text_input if widget.label == "Search query")
+    assert query_input.value == "education"
+    assert selectboxes["Industry / category"].value == "education"
+
+
 def test_match_analysis_result_renders_without_exception():
     app = AppTest.from_file(str(PROJECT_ROOT / "app.py"))
     app.session_state["match_results"] = [

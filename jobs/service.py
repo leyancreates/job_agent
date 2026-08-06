@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from collections.abc import Callable
 
 import httpx
 
 from jobs.cache import PUBLIC_BOARD_CACHE, TTLCache
-from jobs.greenhouse import fetch_greenhouse_jobs
-from jobs.lever import fetch_lever_jobs
 from jobs.models import JobPosting
+from jobs.providers import get_provider_adapter
 from jobs.query import SearchQuery
+from jobs.relevance import MIN_RELEVANCE_SCORE, evaluate_relevance
 from jobs.registry import BoardEntry, entry_from_url
 from jobs.urls import UnsupportedJobBoardError
 
@@ -27,6 +28,7 @@ class JobSearchResult:
     warnings: list[str]
     companies_checked: int
     total_companies: int
+    categories_checked: dict[str, int] = field(default_factory=dict)
 
 
 def _retryable(exc: Exception) -> bool:
@@ -41,22 +43,26 @@ def _fetch_board(
     entry: BoardEntry,
     client: httpx.Client,
     cache: TTLCache,
+    query: SearchQuery,
     *,
     retries: int,
     sleep: Callable[[float], None],
 ) -> list[JobPosting]:
-    key = (entry.provider, entry.identifier)
+    adapter = get_provider_adapter(entry.provider)
+    key: tuple[str, ...] = (entry.provider, entry.identifier)
+    if adapter.query_scoped_cache:
+        key += (" ".join(query.keywords.casefold().split()),)
 
     def load() -> list[JobPosting]:
         for attempt in range(retries + 1):
             try:
                 board = entry.board_reference()
-                fetcher = (
-                    fetch_greenhouse_jobs
-                    if entry.provider == "greenhouse"
-                    else fetch_lever_jobs
+                return adapter.fetch_jobs(
+                    board,
+                    client,
+                    company=entry.company,
+                    query=query,
                 )
-                return fetcher(board, client, company=entry.company)
             except httpx.HTTPError as exc:
                 if attempt >= retries or not _retryable(exc):
                     raise
@@ -76,14 +82,7 @@ def _location_matches(job: JobPosting, location: str) -> bool:
 
 
 def relevance_score(job: JobPosting, query: SearchQuery) -> int:
-    tokens = [token.casefold() for token in query.keywords.split() if token]
-    title = job.title.casefold()
-    description = job.job_description.casefold()
-    score = sum(4 for token in tokens if token in title)
-    score += sum(1 for token in tokens if token in description)
-    if query.keywords.casefold() in title and query.keywords.strip():
-        score += 5
-    return score
+    return evaluate_relevance(job, query).score
 
 
 def _posted_timestamp(value: str | None) -> float:
@@ -96,19 +95,32 @@ def _posted_timestamp(value: str | None) -> float:
 
 
 def filter_rank_dedupe(jobs: list[JobPosting], query: SearchQuery) -> list[JobPosting]:
-    tokens = [token.casefold() for token in query.keywords.split() if token]
     unique: dict[tuple[str, ...], JobPosting] = {}
     for job in jobs:
-        searchable = f"{job.title} {job.job_description}".casefold()
-        if (
-            job.job_url
-            and all(token in searchable for token in tokens)
-            and _location_matches(job, query.location)
+        match = evaluate_relevance(job, query)
+        keyword_match = not query.keywords.strip() or (
+            match.all_terms_matched and match.score >= MIN_RELEVANCE_SCORE
+        )
+        if not job.job_url or not keyword_match or not _location_matches(job, query.location):
+            continue
+        scored_job = replace(
+            job,
+            relevance_score=match.score,
+            matched_terms=match.matched_terms,
+            match_type=match.match_type,
+        )
+        existing = unique.get(job.dedupe_key)
+        if existing is None or (
+            scored_job.relevance_score,
+            _posted_timestamp(scored_job.posted_date),
+        ) > (
+            existing.relevance_score,
+            _posted_timestamp(existing.posted_date),
         ):
-            unique.setdefault(job.dedupe_key, job)
+            unique[job.dedupe_key] = scored_job
     return sorted(
         unique.values(),
-        key=lambda job: (relevance_score(job, query), _posted_timestamp(job.posted_date)),
+        key=lambda job: (job.relevance_score, _posted_timestamp(job.posted_date)),
         reverse=True,
     )
 
@@ -126,8 +138,9 @@ def search_job_boards(
 ) -> JobSearchResult:
     entries = list({(entry.provider, entry.identifier): entry for entry in entries}.values())
     total = len(entries)
+    categories_checked = dict(Counter(entry.category for entry in entries))
     if not entries:
-        return JobSearchResult([], [], 0, 0)
+        return JobSearchResult([], [], 0, 0, {})
 
     workers = max(1, min(max_workers, 12, total))
     owns_client = client is None
@@ -148,6 +161,7 @@ def search_job_boards(
                     entry,
                     http_client,
                     cache,
+                    query,
                     retries=retries,
                     sleep=sleep,
                 ): entry
@@ -157,9 +171,17 @@ def search_job_boards(
                 entry = futures[future]
                 try:
                     collected.extend(future.result())
+                except UnsupportedJobBoardError as exc:
+                    label = entry.company or entry.identifier
+                    warnings.append(f"{label}: {exc}")
                 except (httpx.HTTPError, ValueError, TypeError):
                     label = entry.company or entry.identifier
-                    warnings.append(f"{label} ({entry.provider.title()}) is temporarily unavailable.")
+                    provider_name = {
+                        "smartrecruiters": "SmartRecruiters",
+                    }.get(entry.provider, entry.provider.title())
+                    warnings.append(
+                        f"{label} ({provider_name}) is temporarily unavailable."
+                    )
                 checked += 1
                 if progress_callback:
                     progress_callback(checked, total)
@@ -168,7 +190,11 @@ def search_job_boards(
             http_client.close()
 
     return JobSearchResult(
-        filter_rank_dedupe(collected, query), warnings, checked, total
+        filter_rank_dedupe(collected, query),
+        warnings,
+        checked,
+        total,
+        categories_checked,
     )
 
 
@@ -198,4 +224,5 @@ def search_jobs(
         warnings + result.warnings,
         result.companies_checked,
         result.total_companies,
+        result.categories_checked,
     )

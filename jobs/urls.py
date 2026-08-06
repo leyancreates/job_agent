@@ -36,6 +36,29 @@ def parse_board_url(url: str) -> BoardReference:
         token = parts[2] if host.startswith("api.") and len(parts) >= 3 else parts[0]
         return BoardReference("Lever", token, lever_hosts[host])
 
+    if host == "careers.smartrecruiters.com" and parts:
+        return BoardReference("SmartRecruiters", parts[0], "api.smartrecruiters.com")
+    if (
+        host == "api.smartrecruiters.com"
+        and len(parts) >= 4
+        and parts[:2] == ["v1", "companies"]
+        and parts[3] == "postings"
+    ):
+        return BoardReference("SmartRecruiters", parts[2], host)
+
+    if host == "jobs.ashbyhq.com" and parts:
+        return BoardReference("Ashby", parts[0], "api.ashbyhq.com")
+    if (
+        host == "api.ashbyhq.com"
+        and len(parts) >= 3
+        and parts[:2] == ["posting-api", "job-board"]
+    ):
+        return BoardReference("Ashby", parts[2], host)
+
+    if host.endswith(".myworkdayjobs.com") and parts:
+        return BoardReference("Workday", host.split(".", 1)[0], host)
+
     raise UnsupportedJobBoardError(
-        "Use a public Greenhouse URL (boards.greenhouse.io/...) or Lever URL (jobs.lever.co/...)."
+        "Use a public Greenhouse, Lever, SmartRecruiters, or Ashby careers URL. "
+        "Workday URLs can be identified, but are not fetched without a documented public API."
     )

@@ -3,6 +3,7 @@
 import logging
 import csv
 import io
+from collections import Counter
 
 import streamlit as st
 
@@ -11,12 +12,22 @@ from google_docs_editor import apply_tailoring, preview_tailoring
 from google_docs_reader import ConfigurationError, read_google_doc
 from jobs.models import JobPosting
 from jobs.query import parse_search_query
-from jobs.registry import entry_from_url, load_registry
+from jobs.registry import CATEGORIES, entry_from_url, load_registry
 from jobs.service import search_job_boards
 from matching.models import JobMatch
 from matching.service import MatchAnalysisError, analyze_job_matches
 
 logger = logging.getLogger(__name__)
+
+ALL_CATEGORIES = "All categories"
+SEARCH_PRESETS = {
+    "Custom": ("", ALL_CATEGORIES),
+    "Data & Analytics": ("Data Analyst", ALL_CATEGORIES),
+    "Education": ("education", "education"),
+    "Arts & Animation": ("animation", "arts/design"),
+    "Design": ("design", "arts/design"),
+    "Public Sector": ("", "public sector"),
+}
 
 
 def show_operation_error(action: str, exc: Exception) -> None:
@@ -119,7 +130,7 @@ with resume_tab:
                     show_operation_error("apply changes", exc)
 
 
-def job_table_rows(jobs: list[JobPosting]) -> list[dict[str, str | None]]:
+def job_table_rows(jobs: list[JobPosting]) -> list[dict[str, str | int | None]]:
     return [
         {
             "company": job.company,
@@ -128,6 +139,9 @@ def job_table_rows(jobs: list[JobPosting]) -> list[dict[str, str | None]]:
             "job URL": job.job_url,
             "source": job.source,
             "posted date": job.posted_date,
+            "relevance": job.relevance_score,
+            "matched terms": ", ".join(job.matched_terms),
+            "match type": job.match_type,
             "job description": job.job_description[:240],
         }
         for job in jobs
@@ -219,15 +233,44 @@ with finder_tab:
     st.header("Job Finder")
     registry = load_registry()
     st.write(
-        f"Search {len(registry)} maintained public Greenhouse and Lever boards. "
+        f"Search {len(registry)} maintained public Greenhouse, Lever, SmartRecruiters, "
+        "and Ashby boards. "
         "LinkedIn and Indeed are intentionally excluded."
     )
+    coverage = Counter(entry.category for entry in registry)
+    with st.expander("Registry coverage by category"):
+        st.dataframe(
+            [
+                {"category": category, "companies": count}
+                for category, count in sorted(coverage.items())
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+
+    selected_preset = st.selectbox(
+        "Search preset", list(SEARCH_PRESETS), key="job_search_preset"
+    )
+    if st.session_state.get("applied_job_search_preset") != selected_preset:
+        preset_query, preset_category = SEARCH_PRESETS[selected_preset]
+        st.session_state["job_search_query"] = preset_query
+        st.session_state["job_category_filter"] = preset_category
+        st.session_state["applied_job_search_preset"] = selected_preset
+
     search_mode = st.radio(
         "Search mode",
         ["Search all configured companies", "Search one company URL"],
         horizontal=True,
     )
-    query_text = st.text_input("Search query", placeholder="Data Analyst Toronto")
+    query_text = st.text_input(
+        "Search query", placeholder="Animation Toronto", key="job_search_query"
+    )
+    category_filter = st.selectbox(
+        "Industry / category",
+        [ALL_CATEGORIES, *sorted(CATEGORIES)],
+        key="job_category_filter",
+        disabled=search_mode == "Search one company URL",
+    )
     location_mode = st.selectbox(
         "Location handling", ["Auto-detect from query", "Remote", "Custom location"]
     )
@@ -240,29 +283,39 @@ with finder_tab:
     if search_mode == "Search one company URL":
         company_url = st.text_input(
             "Company careers URL",
-            placeholder="https://boards.greenhouse.io/company or https://jobs.lever.co/company",
+            placeholder="Public Greenhouse, Lever, SmartRecruiters, or Ashby careers URL",
         )
 
     location_override = "Remote" if location_mode == "Remote" else custom_location
     parsed_query = parse_search_query(query_text, location_override=location_override)
-    if query_text.strip():
+    if query_text.strip() or parsed_query.location:
         st.caption(
             f"Keywords: {parsed_query.keywords or 'Any'} · "
             f"Location: {parsed_query.location or 'Any'}"
         )
 
     if st.button("Find jobs", type="primary"):
-        if not query_text.strip():
-            st.warning("Enter job keywords, a location, or both.")
+        if (
+            not query_text.strip()
+            and not parsed_query.location
+            and category_filter == ALL_CATEGORIES
+        ):
+            st.warning("Enter job keywords or a location, choose a category, or use a preset.")
         elif search_mode == "Search one company URL" and not company_url.strip():
-            st.warning("Enter a public Greenhouse or Lever company URL.")
+            st.warning(
+                "Enter a public Greenhouse, Lever, SmartRecruiters, or Ashby company URL."
+            )
         else:
             try:
-                entries = (
-                    registry
-                    if search_mode == "Search all configured companies"
-                    else [entry_from_url(company_url)]
-                )
+                if search_mode == "Search all configured companies":
+                    entries = [
+                        entry
+                        for entry in registry
+                        if category_filter == ALL_CATEGORIES
+                        or entry.category == category_filter
+                    ]
+                else:
+                    entries = [entry_from_url(company_url)]
                 progress = st.progress(0, text=f"Checking 0 of {len(entries)} companies...")
 
                 def update_progress(checked: int, total: int) -> None:
@@ -285,6 +338,7 @@ with finder_tab:
                     len(result.jobs),
                 )
                 st.session_state["job_search_warnings"] = result.warnings
+                st.session_state["job_search_categories"] = result.categories_checked
             except ValueError as exc:
                 st.warning(str(exc))
 
@@ -293,6 +347,13 @@ with finder_tab:
     if summary:
         checked, total, found = summary
         st.success(f"Checked {checked} of {total} companies and found {found} matching jobs.")
+        categories_checked = st.session_state.get("job_search_categories", {})
+        if categories_checked:
+            category_summary = " · ".join(
+                f"{category}: {count}"
+                for category, count in sorted(categories_checked.items())
+            )
+            st.caption(f"Companies searched by category — {category_summary}")
     warnings = st.session_state.get("job_search_warnings", [])
     if warnings:
         with st.expander(f"Unavailable boards ({len(warnings)})"):
