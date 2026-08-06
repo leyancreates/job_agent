@@ -57,6 +57,15 @@ def test_streamlit_app_starts_without_exception():
     assert not app.exception
 
 
+def test_resume_source_switch_shows_only_upload_controls():
+    app = AppTest.from_file(str(PROJECT_ROOT / "app.py")).run(timeout=20)
+    app.radio[0].set_value("Upload File").run(timeout=20)
+
+    assert not app.exception
+    assert len(app.get("file_uploader")) == 1
+    assert all(item.label != "Google Docs Resume Link" for item in app.text_input)
+
+
 def test_match_analysis_result_renders_without_exception():
     app = AppTest.from_file(str(PROJECT_ROOT / "app.py"))
     app.session_state["match_results"] = [
