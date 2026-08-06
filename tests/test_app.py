@@ -31,14 +31,44 @@ def test_streamlit_cloud_import_contract_in_fresh_process():
             """
 import app
 from jobs import (
+    CATEGORIES,
     JobPosting,
     entry_from_url,
     load_registry,
     parse_search_query,
     search_job_boards,
 )
+assert CATEGORIES
 assert JobPosting and entry_from_url and load_registry
 assert parse_search_query and search_job_boards
+""",
+        ],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_registry_category_import_matches_streamlit_production_contract():
+    """Guard the exact import that failed after the PR #8 deployment."""
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from jobs.registry import CATEGORIES, entry_from_url, load_registry
+from jobs import CATEGORIES as PUBLIC_CATEGORIES
+
+assert CATEGORIES is PUBLIC_CATEGORIES
+assert CATEGORIES
+assert callable(entry_from_url)
+assert len(load_registry()) >= 50
 """,
         ],
         cwd=PROJECT_ROOT,

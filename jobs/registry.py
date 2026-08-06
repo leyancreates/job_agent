@@ -8,18 +8,28 @@ from pathlib import Path
 
 from jobs.urls import BoardReference, parse_board_url
 
+__all__ = [
+    "BoardEntry",
+    "CATEGORIES",
+    "SUPPORTED_PROVIDERS",
+    "entry_from_url",
+    "load_registry",
+]
+
 REGISTRY_PATH = Path(__file__).with_name("boards.json")
 SUPPORTED_PROVIDERS = {"greenhouse", "lever", "smartrecruiters", "ashby"}
-CATEGORIES = {
-    "technology",
-    "education",
-    "arts/design",
-    "public sector",
-    "nonprofit",
-    "healthcare",
-    "finance",
-    "other",
-}
+CATEGORIES: frozenset[str] = frozenset(
+    {
+        "technology",
+        "education",
+        "arts/design",
+        "public sector",
+        "nonprofit",
+        "healthcare",
+        "finance",
+        "other",
+    }
+)
 
 
 @dataclass(frozen=True)
