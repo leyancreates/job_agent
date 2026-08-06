@@ -1,8 +1,9 @@
 """Streamlit UI for previewing and applying resume edits."""
 
-import logging
 import csv
+import hashlib
 import io
+import logging
 
 import streamlit as st
 
@@ -15,6 +16,13 @@ from jobs.registry import entry_from_url, load_registry
 from jobs.service import search_job_boards
 from matching.models import JobMatch
 from matching.service import MatchAnalysisError, analyze_job_matches
+from resumes import (
+    EmptyResumeError,
+    ResumeContent,
+    ResumeFileError,
+    resume_from_google_doc,
+    resume_from_upload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +34,33 @@ def show_operation_error(action: str, exc: Exception) -> None:
         st.error(str(exc))
     else:
         st.error(f"Could not {action}. Check the app logs or contact the app owner.")
+
+
+def loaded_resume() -> ResumeContent | None:
+    resume = st.session_state.get("resume")
+    if isinstance(resume, ResumeContent):
+        return resume
+    legacy_text = st.session_state.get("resume_text", "")
+    if legacy_text.strip():
+        return ResumeContent(
+            text=legacy_text,
+            source="Session",
+            filename="Loaded resume",
+        )
+    return None
+
+
+def store_resume(resume: ResumeContent) -> None:
+    """Keep one source-independent resume object and a backward-compatible text key."""
+    st.session_state["resume"] = resume
+    st.session_state["resume_text"] = resume.text
+    if resume.google_doc_id:
+        st.session_state["resume_doc_id"] = resume.google_doc_id
+        st.session_state.pop("active_resume_upload_fingerprint", None)
+    else:
+        st.session_state.pop("resume_doc_id", None)
+    st.session_state.pop("edit_preview", None)
+    st.session_state.pop("match_results", None)
 
 
 st.set_page_config(page_title="AI Job Search Agent", layout="wide")
@@ -51,72 +86,134 @@ with resume_tab:
     st.header("Resume Tailor")
     st.write("Preview truthful, job-specific resume edits before applying them to Google Docs.")
 
-    google_doc_link = st.text_input("Google Docs Resume Link", key="google_doc_link")
+    resume_source = st.radio(
+        "Resume Source",
+        ["Google Docs", "Upload File"],
+        horizontal=True,
+        key="resume_source",
+    )
     tailor_notice = st.session_state.get("tailor_job_notice")
     if tailor_notice:
         st.info(tailor_notice)
-    job_description = st.text_area(
-        "Job Description", height=220, key="tailor_job_description"
-    )
-    doc_id = extract_doc_id(google_doc_link)
 
-    if st.button("Load resume"):
-        if not doc_id:
-            st.error("Please enter a valid Google Docs link.")
-        else:
-            try:
-                with st.spinner("Reading Google Docs..."):
-                    resume_text = read_google_doc(doc_id)
-                if not resume_text.strip():
-                    st.warning("This Google Doc does not contain readable resume text.")
-                else:
-                    st.session_state["resume_text"] = resume_text
-                    st.session_state["resume_doc_id"] = doc_id
+    google_doc_link = ""
+    doc_id = ""
+    if resume_source == "Google Docs":
+        google_doc_link = st.text_input("Google Docs Resume Link", key="google_doc_link")
+        doc_id = extract_doc_id(google_doc_link)
+
+        if st.button("Load resume"):
+            if not doc_id:
+                st.error("Please enter a valid Google Docs link.")
+            else:
+                try:
+                    with st.spinner("Reading Google Docs..."):
+                        resume_text = read_google_doc(doc_id)
+                    store_resume(resume_from_google_doc(resume_text, doc_id))
                     st.success("Resume loaded for tailoring and match analysis.")
-            except Exception as exc:
-                show_operation_error("read the document", exc)
-
-    if "resume_text" in st.session_state:
-        st.caption(
-            f"Resume ready for match analysis · {len(st.session_state['resume_text']):,} characters"
+                except EmptyResumeError as exc:
+                    st.warning(str(exc))
+                except Exception as exc:
+                    show_operation_error("read the document", exc)
+    else:
+        uploaded_file = st.file_uploader(
+            "Upload Resume",
+            type=["pdf", "docx", "txt"],
+            help="Supported formats: PDF, DOCX, and UTF-8 TXT.",
+            key="resume_upload",
         )
+        if uploaded_file is not None:
+            uploaded_data = uploaded_file.getvalue()
+            fingerprint = hashlib.sha256(
+                uploaded_file.name.encode("utf-8") + b"\0" + uploaded_data
+            ).hexdigest()
+            if fingerprint != st.session_state.get("uploaded_resume_fingerprint"):
+                st.session_state["uploaded_resume_fingerprint"] = fingerprint
+                st.session_state.pop("uploaded_resume_content", None)
+                st.session_state.pop("uploaded_resume_error", None)
+                try:
+                    st.session_state["uploaded_resume_content"] = resume_from_upload(
+                        uploaded_file.name, uploaded_data
+                    )
+                except ResumeFileError as exc:
+                    st.session_state["uploaded_resume_error"] = str(exc)
+                except Exception:
+                    logger.exception("Unexpected uploaded resume parsing failure")
+                    st.session_state["uploaded_resume_error"] = (
+                        "Could not read this resume. Try exporting it again as PDF, DOCX, or UTF-8 TXT."
+                    )
+
+            upload_error = st.session_state.get("uploaded_resume_error")
+            if upload_error:
+                st.error(upload_error)
+            else:
+                uploaded_resume = st.session_state.get("uploaded_resume_content")
+                if (
+                    isinstance(uploaded_resume, ResumeContent)
+                    and st.session_state.get("active_resume_upload_fingerprint")
+                    != fingerprint
+                ):
+                    store_resume(uploaded_resume)
+                    st.session_state["active_resume_upload_fingerprint"] = fingerprint
+
+    resume = loaded_resume()
+    if resume is not None:
+        st.success("✓ Resume loaded")
+        source_column, filename_column, word_count_column = st.columns(3)
+        source_column.write(f"Source: {resume.source}")
+        filename_column.write(f"Filename: {resume.filename}")
+        word_count_column.write(f"Word count: {resume.word_count:,}")
         st.text_area(
             "Resume preview",
-            value=st.session_state["resume_text"],
+            value=resume.text,
             height=300,
             disabled=True,
         )
 
-    if st.button("Generate edit preview"):
-        if not doc_id or not job_description.strip():
-            st.warning("Add a valid Google Docs link and job description first.")
-        else:
-            try:
-                with st.spinner("Preparing suggestions..."):
-                    bullets, improved = preview_tailoring(doc_id, job_description)
-                st.session_state["edit_preview"] = (doc_id, bullets, improved)
-            except Exception as exc:
-                show_operation_error("prepare suggestions", exc)
+    if resume_source == "Google Docs":
+        job_description = st.text_area(
+            "Job Description", height=220, key="tailor_job_description"
+        )
 
-    preview = st.session_state.get("edit_preview")
-    if preview:
-        preview_doc_id, bullets, improved = preview
-        if not bullets:
-            st.info("No bullet points were found in this document.")
-        else:
-            st.subheader("Review proposed changes")
-            for index, (original, replacement) in enumerate(zip(bullets, improved), start=1):
-                st.markdown(f"**{index}. Original** — {original.text}")
-                st.markdown(f"**Proposed** — {replacement}")
-
-            st.warning("Applying will update the original Google Doc. Review every change first.")
-            if st.button("Apply reviewed changes", type="primary"):
+        if st.button("Generate edit preview"):
+            if not doc_id or not job_description.strip():
+                st.warning("Add a valid Google Docs link and job description first.")
+            else:
                 try:
-                    count = apply_tailoring(preview_doc_id, bullets, improved)
-                    st.success(f"Updated {count} bullet points.")
-                    del st.session_state["edit_preview"]
+                    with st.spinner("Preparing suggestions..."):
+                        bullets, improved = preview_tailoring(doc_id, job_description)
+                    st.session_state["edit_preview"] = (doc_id, bullets, improved)
                 except Exception as exc:
-                    show_operation_error("apply changes", exc)
+                    show_operation_error("prepare suggestions", exc)
+
+        preview = st.session_state.get("edit_preview")
+        if preview:
+            preview_doc_id, bullets, improved = preview
+            if not bullets:
+                st.info("No bullet points were found in this document.")
+            else:
+                st.subheader("Review proposed changes")
+                for index, (original, replacement) in enumerate(
+                    zip(bullets, improved), start=1
+                ):
+                    st.markdown(f"**{index}. Original** — {original.text}")
+                    st.markdown(f"**Proposed** — {replacement}")
+
+                st.warning(
+                    "Applying will update the original Google Doc. Review every change first."
+                )
+                if st.button("Apply reviewed changes", type="primary"):
+                    try:
+                        count = apply_tailoring(preview_doc_id, bullets, improved)
+                        st.success(f"Updated {count} bullet points.")
+                        del st.session_state["edit_preview"]
+                    except Exception as exc:
+                        show_operation_error("apply changes", exc)
+    else:
+        st.info(
+            "Uploaded resumes are read-only. They are available to Match Analysis and future "
+            "scoring features; switch to Google Docs to preview or apply document edits."
+        )
 
 
 def job_table_rows(jobs: list[JobPosting]) -> list[dict[str, str | None]]:
@@ -143,13 +240,13 @@ def analyze_selection(jobs: list[JobPosting]) -> None:
     if not jobs:
         st.warning("Select at least one job to analyze.")
         return
-    resume_text = st.session_state.get("resume_text", "")
-    if not resume_text.strip():
+    resume = loaded_resume()
+    if resume is None:
         st.warning("Load your resume in Resume Tailor before analyzing matches.")
         return
     try:
         with st.spinner(f"Analyzing {len(jobs)} selected job(s)..."):
-            st.session_state["match_results"] = analyze_job_matches(resume_text, jobs)
+            st.session_state["match_results"] = analyze_job_matches(resume.text, jobs)
         st.success("Match analysis is ready in the Match Analysis tab.")
     except MatchAnalysisError as exc:
         logger.warning("Match analysis failed", exc_info=True)

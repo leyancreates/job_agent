@@ -1,6 +1,6 @@
 # AI Job Search Agent
 
-A modular Python and Streamlit project for finding public jobs, saving opportunities, comparing resume fit, and tailoring a Google Docs resume. The app does not submit applications.
+A modular Python and Streamlit project for finding public jobs, saving opportunities, comparing resume fit, and working with a Google Docs or uploaded resume. The app does not submit applications.
 
 ## Architecture
 
@@ -21,6 +21,10 @@ matching/
   models.py               validated scores, recommendations, and evidence fields
   cache.py                thread-safe six-hour match-result cache
   service.py              batched Responses API calls and strict JSON Schema validation
+resumes/
+  models.py               source-independent ResumeContent model
+  parsers.py              PDF, DOCX, TXT, and Google Docs text normalization
+  errors.py               safe upload and extraction errors
 google_docs_reader.py     Google Docs authentication and reading
 google_docs_editor.py     resume preview and confirmed write-back
 tests/                    mocked HTTP, OpenAI, Streamlit, and resume workflow tests
@@ -74,9 +78,22 @@ Run `pytest tests/test_jobs.py` after every registry change. Tests enforce at le
 - Cache state and saved jobs are process/session scoped; download CSV before a Streamlit restart if durable storage is needed.
 - LinkedIn, Indeed, Google Jobs, protected sites, and automatic application submission are intentionally out of scope.
 
+## Resume sources
+
+In **Resume Tailor**, choose one source:
+
+- **Google Docs** keeps the existing link, preview, and confirmed write-back workflow.
+- **Upload File** accepts PDF, DOCX, and UTF-8 TXT resumes. PDF text is extracted with `pdfplumber`, DOCX paragraphs and table cells with `python-docx`, and TXT directly as UTF-8.
+
+Both sources create the same `ResumeContent` object and store its plain text in Streamlit session state. After loading, the UI shows a confirmation, filename, word count, and text preview. Match Analysis and future scoring features consume the same resume text regardless of source.
+
+Uploaded files are read-only in this phase: the app extracts and analyzes their text but does not overwrite or export a modified PDF/DOCX. Switch to Google Docs when you want to preview and apply Resume Tailor edits. Empty, unsupported, corrupted, password-protected, or non-UTF-8 files produce safe user-facing messages.
+
+Image-only or scanned PDFs require OCR, which is not included in this phase; they are reported as containing no readable text.
+
 ## Resume Match Analysis
 
-1. In **Resume Tailor**, load a Google Docs resume. Its plain text is kept in the current Streamlit session and the document is not modified during scoring.
+1. In **Resume Tailor**, load a Google Docs resume or upload a PDF, DOCX, or UTF-8 TXT file. Its plain text is kept in the current Streamlit session and the source document is not modified during scoring.
 2. Search or open Saved Jobs, select up to 10 rows, and choose **Analyze match**.
 3. The app sends one batched Responses API request for selected jobs that are not already cached.
 4. Open **Match Analysis** to compare overall, skills, experience, and education/domain scores. Expand each result for strengths, gaps, factual concerns, and a short explanation.
@@ -92,7 +109,7 @@ Scores are guidance for prioritizing review, not hiring predictions. Missing res
 
 ### Privacy, cost, and caching
 
-- Match requests contain only resume text plus each job's company, title, location, and description. Job URLs, source metadata, and saved-job state are not sent.
+- Uploaded files are parsed inside the Streamlit process. Match requests contain only extracted resume text plus each job's company, title, location, and description. Job URLs, source metadata, saved-job state, and original file bytes are not sent.
 - Responses API requests set `store=false`. Review your OpenAI organization settings and policies for any additional retention controls your deployment requires.
 - At most 10 jobs are analyzed per batch. Resume input is capped at 30,000 characters and each job description at 16,000 characters to bound latency and token usage; unusually long documents may therefore receive incomplete coverage.
 - Results are cached in memory for six hours using a SHA-256 hash of the resume, job details, and `OPENAI_MODEL`. Repeated Streamlit reruns reuse cached results, but cache state is lost when the process restarts.
@@ -118,7 +135,7 @@ Scores are guidance for prioritizing review, not hiring predictions. Missing res
    ```
 
 3. Export `OPENAI_API_KEY`. Optionally override `OPENAI_MODEL`.
-4. In Google Cloud, enable the Google Docs API and Google Drive API, create an OAuth Desktop App, and download its JSON credentials as `client_secret.json`.
+4. To use the Google Docs source, enable the Google Docs API and Google Drive API, create an OAuth Desktop App, and download its JSON credentials as `client_secret.json`. This is not required when using uploaded resumes only.
 5. Run:
 
    ```bash
@@ -129,7 +146,7 @@ Set `GOOGLE_CLIENT_SECRET_FILE=client_secret.json`. The first Google Docs operat
 
 ## Deploy to Streamlit Community Cloud
 
-1. Create a Google Cloud service account, enable the Google Docs and Drive APIs, and download its JSON key once.
+1. If the deployment will use Google Docs, create a Google Cloud service account, enable the Google Docs and Drive APIs, and download its JSON key once. Skip this and the next step for upload-only deployments.
 2. Share each resume Google Doc with the service account's `client_email` as an editor. A service account cannot access a document merely because its URL is known.
 3. Open [Streamlit Community Cloud](https://share.streamlit.io), choose this repository and branch, and set the entrypoint to `app.py`.
 4. In **Advanced settings**, select Python 3.12 and paste these root-level secrets:
