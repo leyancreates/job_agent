@@ -3,14 +3,19 @@
 import logging
 import csv
 import io
-import os
 
 import streamlit as st
 
 from doc_utils import extract_doc_id
 from google_docs_editor import apply_tailoring, preview_tailoring
 from google_docs_reader import ConfigurationError, read_google_doc
-from jobs import JobPosting, search_jobs
+from jobs import (
+    JobPosting,
+    entry_from_url,
+    load_registry,
+    parse_search_query,
+    search_job_boards,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,27 +106,87 @@ def job_table_rows(jobs: list[JobPosting]) -> list[dict[str, str | None]]:
 
 with finder_tab:
     st.header("Job Finder")
-    st.write("Search public Greenhouse and Lever boards. LinkedIn and Indeed are intentionally excluded.")
-    keywords = st.text_input("Job keywords", placeholder="data analyst Python")
-    location = st.text_input("Location", placeholder="Toronto or Remote")
-    company_url = st.text_input(
-        "Company careers URL (optional)",
-        placeholder="https://boards.greenhouse.io/company or https://jobs.lever.co/company",
+    registry = load_registry()
+    st.write(
+        f"Search {len(registry)} maintained public Greenhouse and Lever boards. "
+        "LinkedIn and Indeed are intentionally excluded."
     )
+    search_mode = st.radio(
+        "Search mode",
+        ["Search all configured companies", "Search one company URL"],
+        horizontal=True,
+    )
+    query_text = st.text_input("Search query", placeholder="Data Analyst Toronto")
+    location_mode = st.selectbox(
+        "Location handling", ["Auto-detect from query", "Remote", "Custom location"]
+    )
+    custom_location = (
+        st.text_input("Custom location", placeholder="Toronto")
+        if location_mode == "Custom location"
+        else ""
+    )
+    company_url = ""
+    if search_mode == "Search one company URL":
+        company_url = st.text_input(
+            "Company careers URL",
+            placeholder="https://boards.greenhouse.io/company or https://jobs.lever.co/company",
+        )
+
+    location_override = "Remote" if location_mode == "Remote" else custom_location
+    parsed_query = parse_search_query(query_text, location_override=location_override)
+    if query_text.strip():
+        st.caption(
+            f"Keywords: {parsed_query.keywords or 'Any'} · "
+            f"Location: {parsed_query.location or 'Any'}"
+        )
 
     if st.button("Find jobs", type="primary"):
-        configured_urls = [url.strip() for url in os.getenv("JOB_BOARD_URLS", "").split(",") if url.strip()]
-        board_urls = configured_urls + ([company_url] if company_url.strip() else [])
-        if not board_urls:
-            st.warning("Enter a Greenhouse or Lever careers URL, or configure JOB_BOARD_URLS.")
+        if not query_text.strip():
+            st.warning("Enter job keywords, a location, or both.")
+        elif search_mode == "Search one company URL" and not company_url.strip():
+            st.warning("Enter a public Greenhouse or Lever company URL.")
         else:
-            with st.spinner("Collecting public job postings..."):
-                result = search_jobs(board_urls, keywords=keywords, location=location)
-            st.session_state["job_results"] = result.jobs
-            for warning in result.warnings:
-                st.warning(warning)
+            try:
+                entries = (
+                    registry
+                    if search_mode == "Search all configured companies"
+                    else [entry_from_url(company_url)]
+                )
+                progress = st.progress(0, text=f"Checking 0 of {len(entries)} companies...")
+
+                def update_progress(checked: int, total: int) -> None:
+                    progress.progress(
+                        checked / total,
+                        text=f"Checked {checked} of {total} companies...",
+                    )
+
+                result = search_job_boards(
+                    entries,
+                    parsed_query,
+                    max_workers=8,
+                    progress_callback=update_progress,
+                )
+                progress.empty()
+                st.session_state["job_results"] = result.jobs
+                st.session_state["job_search_summary"] = (
+                    result.companies_checked,
+                    result.total_companies,
+                    len(result.jobs),
+                )
+                st.session_state["job_search_warnings"] = result.warnings
+            except ValueError as exc:
+                st.warning(str(exc))
 
     jobs = st.session_state.get("job_results", [])
+    summary = st.session_state.get("job_search_summary")
+    if summary:
+        checked, total, found = summary
+        st.success(f"Checked {checked} of {total} companies and found {found} matching jobs.")
+    warnings = st.session_state.get("job_search_warnings", [])
+    if warnings:
+        with st.expander(f"Unavailable boards ({len(warnings)})"):
+            for warning in warnings:
+                st.warning(warning)
     if jobs:
         event = st.dataframe(
             job_table_rows(jobs),
