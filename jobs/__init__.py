@@ -1,9 +1,9 @@
 """Public job-board collection and normalization."""
 
-from jobs.models import JobPosting
-from jobs.query import SearchQuery, parse_search_query
-from jobs.registry import BoardEntry, entry_from_url, load_registry
-from jobs.service import JobSearchResult, search_job_boards, search_jobs
+from .models import JobPosting
+from .query import SearchQuery, parse_search_query
+from .registry import BoardEntry, entry_from_url, load_registry
+from .service import JobSearchResult, search_job_boards, search_jobs
 
 __all__ = [
     "BoardEntry",
