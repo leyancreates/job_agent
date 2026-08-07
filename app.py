@@ -10,10 +10,14 @@ import streamlit as st
 from doc_utils import extract_doc_id
 from google_docs_editor import apply_tailoring, preview_tailoring
 from google_docs_reader import ConfigurationError, read_google_doc
-from jobs.models import JobPosting
-from jobs.query import parse_search_query
-from jobs.registry import CATEGORIES, entry_from_url, load_registry
-from jobs.service import search_job_boards
+from jobs import (
+    CATEGORIES,
+    JobPosting,
+    entry_from_url,
+    load_registry,
+    parse_search_query,
+    search_job_boards,
+)
 from matching.models import JobMatch
 from matching.service import MatchAnalysisError, analyze_job_matches
 
